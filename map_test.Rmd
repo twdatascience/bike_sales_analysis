@@ -1,0 +1,33 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library(tidyverse)
+library(gtrendsR)
+library(usmap)
+```
+
+```{r}
+thanksgiving <- gtrends("thanksgiving",geo = "US", time = "now 1-d")
+```
+
+```{r}
+thanksgiving_states <- thanksgiving$interest_by_region
+```
+
+```{r}
+thanksgiving_states$fips <- fips(thanksgiving_states$location)
+```
+
+```{r}
+plot_usmap(data = thanksgiving_states, values = 'hits', color = 'red', labels = FALSE) +
+  scale_fill_continuous(low = 'white', high = 'red',
+                        name = 'Popularity', label = scales::comma) +
+  theme(legend.position = 'right',
+        panel.background = element_rect(color = 'black'))
+```
+

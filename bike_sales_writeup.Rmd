@@ -1,0 +1,188 @@
+---
+title: "Bike Sales Write UP"
+author: "Tyler Wilson"
+date: "7/27/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+library(sweep)
+library(forecast)
+library(patchwork)
+library(scales)
+library(usmap)
+
+theme_set(theme_minimal())
+```
+
+```{r load_data}
+bikes <- bike_sales %>% 
+  select(-order.line, -customer.id, -latitude, -longitude, -product.id) %>% 
+  mutate_if(is.character, as_factor)
+```
+
+```{r set_colors}
+# new trial to create and set new theme
+primary_palette <- setNames(c('#228B22', '#333333'), unique(bikes$category.primary))
+
+secondary_palette <- set_names(hue_pal()(length(unique(bikes$category.secondary))), unique(bikes$category.secondary))
+
+extras_palette <- RColorBrewer::brewer.pal(8, 'Set2')
+
+bikes_palette <- c(primary_palette, secondary_palette, extras_palette)
+
+scale_fill_bikes <- function() {
+  scale_fill_manual(values = bikes_palette)
+}
+
+scale_colour_bikes <- function() {
+  scale_colour_manual(values = bikes_palette)
+}
+
+options(ggplot2.discrete.fill = scale_fill_bikes,
+        ggplot2.discrete.colour = scale_colour_bikes)
+```
+
+# Build Forcast for Quantity Sold of Primary Categories
+This analysis started as a way to learn time series techniques, with out worrying about if they should be used. This analysis is largely based on the vignette produced by RStudio. The vignette can be found at https://cran.rstudio.com/web/packages/sweep/vignettes/SW01_Forecasting_Time_Series_Groups.html. In that example it shows time series predictions for secondary categories. To learn the techniques better and practice with them, I initially decided to use the same data but primary categories.
+
+## Look at Primary Categories
+```{r}
+# create new dataframe for primary categories
+monthly_qty_by_primary <- bike_sales %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, category.primary) %>% 
+  summarise(total.qty = sum(quantity))
+
+monthly_qty_by_primary %>% 
+  ggplot(aes(order.month, total.qty, group = category.primary)) +
+  geom_line(aes(color = category.primary)) +
+  facet_wrap(~ category.primary) +
+  labs(title = 'Quantity Sold: Year Plot',
+       x = '',
+       y = 'Number Sold',
+       subtitle = 'By Primary Category') +
+  scale_y_continuous() +
+  scale_x_date(date_labels = '%Y') +
+  theme_tq() +
+  theme(legend.position = 'none')
+```
+
+## Create Forecast
+
+### Create Temporary Data Frames
+```{r}
+# Create time series
+monthly_qty_by_primary_ts <- monthly_qty_by_primary %>% 
+  group_by(category.primary) %>% 
+  nest() %>% 
+  mutate(data.ts = map(.x = data,
+                       .f = tk_ts,
+                       select = -order.month,
+                       start = 2011,
+                       freq = 12))
+
+# create fit
+monthly_qty_by_primary_fit <- monthly_qty_by_primary_ts %>% 
+  mutate(fit.ets = map(data.ts, ets, model = 'MAM'))
+
+# get residuals
+prime_augment_fit_ets <- monthly_qty_by_primary_fit %>% 
+  mutate(augment = map(fit.ets, sw_augment, timetk_idx = TRUE, rename_index = 'date')) %>% 
+  unnest(augment)
+```
+
+```{r}
+monthly_qty_by_primary_fit %>% 
+  mutate(glance = map(fit.ets, sw_glance)) %>% 
+  unnest(glance)
+```
+
+```{r}
+# plot augmented fit residuals (goodness of forecast)
+prime_augment_fit_ets %>% 
+  ggplot(aes(date, .resid, group = category.primary)) +
+  geom_hline(yintercept = 0, color = 'black') +
+  geom_line(color = 'red') +
+  geom_smooth(method = 'loess') + 
+  facet_wrap(~ category.primary) +
+  labs(title = 'Bike Quantity Sold by Primary Category',
+       subtitle = 'ETS Model Residuals',
+       x = '',
+       y = 'Residual') +
+  scale_x_date(date_labels = '%Y')
+```
+
+### Forecast
+```{r}
+monthly_qty_by_primary_fcast <- monthly_qty_by_primary_fit %>% 
+  mutate(fcast.ets = map(fit.ets, forecast, h = 12))
+
+monthly_qty_by_primary_fcast_tidy <- monthly_qty_by_primary_fcast %>% 
+  mutate(sweep = map(fcast.ets, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>%
+  unnest(sweep)
+```
+
+```{r}
+actual_fcast <- monthly_qty_by_primary_fcast_tidy %>% 
+  filter(key == 'actual')
+
+forecast_fcast <- monthly_qty_by_primary_fcast_tidy %>% 
+  filter(key == 'forecast')
+
+
+forecast_fcast %>% 
+  ggplot(aes(index, total.qty)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = 'light blue',
+              color = NA) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = 'blue',
+              color = NA,
+              alpha = .7) +
+  geom_line(color = 'red') +
+  geom_line(data = actual_fcast, aes(index, total.qty, color = category.primary)) +
+  facet_wrap(~ category.primary) +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  labs(title = 'Forecasted Quantity',
+       subtitle = 'By Primary Category',
+       x = '',
+       y = 'Quantity') +
+  theme_tq() +
+  theme(legend.position = 'none',
+        axis.title.y = element_text(angle = 0, vjust = .6))
+```
+
+```{r}
+monthly_qty_by_primary_fcast_tidy %>% 
+  ggplot(aes(index, total.qty)) +
+  geom_ribbon(aes(ymin = 0, #lo.95,
+                  ymax = hi.95),
+              fill = 'light blue',
+              color = NA) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = 'blue',
+              color = NA,
+              alpha = .7) +
+  geom_point(aes(color = category.primary, shape = key)) + 
+  geom_line(aes(color = category.primary)) +
+  # geom_smooth(method = 'loess', se = FALSE, color = 'red', size = 0.5) +
+  facet_wrap(~ category.primary) +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  labs(title = 'Forecasted Quantity',
+       subtitle = 'By Primary Category',
+       x = '',
+       y = 'Quantity') +
+  theme_tq() +
+  theme(legend.position = 'none',
+        axis.title.y = element_text(angle = 0, vjust = .6))
+```
+

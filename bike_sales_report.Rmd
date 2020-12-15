@@ -1,0 +1,657 @@
+---
+title: "Bike Sales Report"
+author: "Tyler Wilson"
+date: "7/26/2020"
+output: 
+  html_document:
+    fig_width: 10
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+library(sweep)
+library(forecast)
+library(patchwork)
+library(scales)
+library(usmap)
+
+bikes <- bike_sales %>% 
+  select(-order.line, -customer.id, -latitude, -longitude, -product.id) %>% 
+  mutate_if(is.character, as_factor)
+
+# new trial to create and set new theme
+bikes_palette <- setNames(c('#228B22', '#333333'), c('Mountain', 'Road'))
+
+custom_palette <- set_names(hue_pal()(length(unique(bikes$category.secondary))), unique(bikes$category.secondary))
+
+theme_bikes <- ggplot() + scale_fill_manual(values = bikes_palette) +
+  theme_minimal()
+
+
+
+```
+
+# Build Forcast for Quantity Sold of Primary Categories
+This analysis started as a way to learn time series techniques, with out worrying about if they should be used. This analysis is largely based on the vignette produced by RStudio. The vignette can be found at https://cran.rstudio.com/web/packages/sweep/vignettes/SW01_Forecasting_Time_Series_Groups.html. In that example it shows time series predictions for secondary categories. To learn the techniques better and practice with them, I initially decided to use the same data but primary categories.
+
+## Look at Primary Categories
+```{r}
+# create new dataframe for primary categories
+monthly_qty_by_primary <- bike_sales %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, category.primary) %>% 
+  summarise(total.qty = sum(quantity))
+
+monthly_qty_by_primary %>% 
+  ggplot(aes(order.month, total.qty, group = category.primary)) +
+  geom_line(aes(color = category.primary)) +
+  facet_wrap(~ category.primary) +
+  labs(title = 'Quantity Sold: Year Plot',
+       x = '',
+       y = 'Number Sold',
+       subtitle = 'By Primary Category') +
+  scale_y_continuous() +
+  scale_x_date(date_labels = '%Y') +
+  theme_tq() +
+  theme(legend.position = 'none')
+```
+
+## Create Forecast
+
+### Create Temporary Data Frames
+```{r}
+# Create time series
+monthly_qty_by_primary_ts <- monthly_qty_by_primary %>% 
+  group_by(category.primary) %>% 
+  nest() %>% 
+  mutate(data.ts = map(.x = data,
+                       .f = tk_ts,
+                       select = -order.month,
+                       start = 2011,
+                       freq = 12))
+
+monthly_qty_by_primary_ts
+
+# create fit
+monthly_qty_by_primary_fit <- monthly_qty_by_primary_ts %>% 
+  mutate(fit.ets = map(data.ts, ets, model = 'MAM'))
+
+monthly_qty_by_primary_fit
+```
+
+```{r}
+monthly_qty_by_primary_fit %>% 
+  mutate(glance = map(fit.ets, sw_glance)) %>% 
+  unnest(glance)
+```
+
+```{r}
+prime_augment_fit_ets <- monthly_qty_by_primary_fit %>% 
+  mutate(augment = map(fit.ets, sw_augment, timetk_idx = TRUE, rename_index = 'date')) %>% 
+  unnest(augment)
+
+prime_augment_fit_ets
+```
+
+```{r}
+# plot augmented fit residuals (goodness of forecast)
+prime_augment_fit_ets %>% 
+  ggplot(aes(date, .resid, group = category.primary)) +
+  geom_hline(yintercept = 0, color = 'black') +
+  geom_line(color = 'red') +
+  geom_smooth(method = 'loess') + 
+  facet_wrap(~ category.primary, scale = 'free_y') +
+  labs(title = 'Bike Quantity Sold by Primary Category',
+       subtitle = 'ETS Model Residuals',
+       x = '',
+       y = 'Residual') +
+  scale_x_date(date_labels = '%Y')
+```
+
+### Forecast
+```{r}
+monthly_qty_by_primary_fcast <- monthly_qty_by_primary_fit %>% 
+  mutate(fcast.ets = map(fit.ets, forecast, h = 12))
+
+monthly_qty_by_primary_fcast_tidy <- monthly_qty_by_primary_fcast %>% 
+  mutate(sweep = map(fcast.ets, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>%
+  unnest(sweep)
+
+monthly_qty_by_primary_fcast_tidy
+```
+
+```{r}
+monthly_qty_by_primary_fcast_tidy %>% 
+  ggplot(aes(index, total.qty, color = key, group = category.primary)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = 'light blue',
+              color = NA) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = 'blue',
+              color = NA,
+              alpha = .7) +
+  geom_line() +
+  facet_wrap(~ category.primary, scales = 'free_y') +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y')
+```
+
+
+## Try normalizing to get better prediction
+# ```{r}
+# norm_primary <- monthly_qty_by_primary %>% 
+#   group_by(category.primary) %>% 
+#   mutate(scaled.qty = unlist(scale(total.qty, center = FALSE)[,1])) %>% 
+#   ungroup() %>% 
+#   select(-total.qty)
+# 
+# norm_primary %>% 
+#   ggplot(aes(order.month, scaled.qty, group = category.primary, color = category.primary)) +
+#   geom_line() +
+#   facet_wrap(~ category.primary) +
+#   labs(title = 'Bike Sales by Primary Category',
+#        subtitle = 'Normalized',
+#        x = '',
+#        y = '') +
+#   theme(legend.position = 'none')
+# ```
+# 
+# ```{r}
+# # Create time series
+# norm_primary_ts <- norm_primary %>% 
+#   group_by(category.primary) %>% 
+#   nest() %>% 
+#   mutate(data.ts = map(.x = data,
+#                        .f = tk_ts,
+#                        select = -order.month,
+#                        start = 2011,
+#                        freq = 12))
+# 
+# norm_primary_ts
+# 
+# # create fit
+# norm_primary_fit <- norm_primary_ts %>% 
+#   mutate(fit.ets = map(data.ts, ets))
+# 
+# norm_primary_fit
+# ```
+# 
+# ```{r}
+# norm_primary_fit %>% 
+#   mutate(glance = map(fit.ets, sw_glance)) %>% 
+#   unnest(glance)
+# ```
+# 
+# ```{r}
+# norm_primary_fit_ets <- norm_primary_fit %>% 
+#   mutate(augment = map(fit.ets, sw_augment, timetk_idx = TRUE, rename_index = 'date')) %>% 
+#   unnest(augment)
+# 
+# norm_primary_fit_ets
+# ```
+# 
+# ```{r}
+# # plot augmented fit residuals (goodness of forecast)
+# norm_primary_fit_ets %>% 
+#   ggplot(aes(date, .resid, group = category.primary)) +
+#   geom_hline(yintercept = 0, color = 'black') +
+#   geom_line(color = 'red') +
+#   geom_smooth(method = 'loess') + 
+#   facet_wrap(~ category.primary, scale = 'free_y') +
+#   labs(title = 'Bike Quantity Sold by Primary Category',
+#        subtitle = 'ETS Model Residuals',
+#        x = '',
+#        y = 'Residual') +
+#   scale_x_date(date_labels = '%Y')
+# ```
+# 
+# ### Forecast
+# ```{r}
+# norm_primary_fcast <- norm_primary_fit %>% 
+#   mutate(fcast.ets = map(fit.ets, forecast, h = 12))
+# 
+# norm_primary_fcast_tidy <- norm_primary_fcast %>% 
+#   mutate(sweep = map(fcast.ets, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>%
+#   unnest(sweep)
+# 
+# norm_primary_fcast_tidy
+# ```
+# 
+# ```{r}
+# norm_primary_fcast_tidy %>% 
+#   ggplot(aes(index, scaled.qty, color = key, group = category.primary)) +
+#   geom_ribbon(aes(ymin = lo.95,
+#                   ymax = hi.95),
+#               fill = 'light blue',
+#               color = NA) +
+#   geom_ribbon(aes(ymin = lo.80,
+#                   ymax = hi.80,
+#                   fill = key),
+#               fill = 'blue',
+#               color = NA,
+#               alpha = .7) +
+#   geom_line() +
+#   facet_wrap(~ category.primary, scales = 'free_y') +
+#   scale_x_date(date_breaks = '1 year', date_labels = '%Y')
+# ```
+
+# Bike Sales Exploration
+```{r}
+bikes <- bike_sales %>% 
+  select(-order.line, -customer.id, -latitude, -longitude, -product.id) %>% 
+  mutate_if(is.character, as_factor)
+
+bikes
+```
+
+```{r}
+bikes %>% 
+  summary()
+```
+
+```{r}
+p1 <- bikes %>% 
+  group_by(model, category.primary, category.secondary) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity)) %>% 
+  slice_max(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = category.primary)) +
+  coord_flip() +
+  labs(title = 'Top 10 Most Sold Bike Models',
+       subtitle = 'By Primary Category',
+       x = '',
+       y = '',
+       fill = '') +
+  scale_fill_manual(values = c('#228B22', '#333333'))
+
+p2 <- bikes %>% 
+  group_by(model, category.primary, category.secondary) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity)) %>% 
+  slice_min(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = category.primary)) +
+  coord_flip() +
+  labs(title = 'Bottom 10 Bike Models',
+       subtitle = 'By Sales and Primary Category',
+       x = '',
+       y = '',
+       fill = '') +
+  scale_fill_manual(values = c('#228B22', '#333333'))
+
+p1 + p2
+```
+
+```{r}
+custom_palette <- set_names(hue_pal()(length(unique(bikes$category.secondary))), unique(bikes$category.secondary))
+
+p3 <- bikes %>% 
+  group_by(model, category.primary, category.secondary) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity),
+         category.secondary = fct_reorder(category.secondary, quantity)) %>% 
+  slice_max(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = category.secondary)) +
+  coord_flip() +
+  labs(title = 'Top 10 Most Sold Bike Models',
+       subtitle = 'By Secondary Category',
+       x = '',
+       y = '',
+       fill = '') +
+  scale_fill_manual(values = custom_palette)
+
+p4 <- bikes %>% 
+  group_by(model, category.primary, category.secondary) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity),
+         category.secondary = fct_reorder(category.secondary, quantity)) %>% 
+  slice_min(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = category.secondary)) +
+  coord_flip() +
+  labs(title = 'Bottom 10 Bike Models',
+       subtitle = 'By Sales and Secondary Category',
+       x = '',
+       y = '',
+       fill = '') +
+  scale_fill_manual(values = custom_palette)
+
+p3 + p4
+```
+
+```{r}
+(p1 + p3) / (p2 + p4)
+```
+
+```{r}
+p5 <- bikes %>% 
+  group_by(model, frame) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity)) %>% 
+  slice_max(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = frame)) +
+  coord_flip() +
+  labs(title = 'Top 10 Most Sold Bike Models',
+       subtitle = 'By Primary Category',
+       x = '',
+       y = '',
+       fill = '') 
+
+p6 <- bikes %>% 
+  group_by(model, frame) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity)) %>% 
+  slice_min(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = frame)) +
+  coord_flip() +
+  labs(title = 'Bottom 10 Bike Models',
+       subtitle = 'By Sales and Primary Category',
+       x = '',
+       y = '',
+       fill = '')
+
+p5 + p6
+```
+
+```{r}
+p7 <- bikes %>% 
+  group_by(model, price) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity)) %>% 
+  slice_max(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = price)) +
+  coord_flip() +
+  labs(title = 'Top 10 Most Sold Bike Models',
+       subtitle = 'By Primary Category',
+       x = '',
+       y = '',
+       fill = '') +
+  scale_fill_gradient(low = '#42bf04', high = '#bf0404', limits = c(0, 13000))
+
+p8 <- bikes %>% 
+  group_by(model, price) %>% 
+  summarise(quantity = sum(quantity)) %>% 
+  arrange(desc(quantity)) %>% 
+  ungroup() %>% 
+  mutate(model = fct_reorder(model, quantity)) %>% 
+  slice_min(model, n = 10) %>% 
+  ggplot(aes(model, quantity)) +
+  geom_bar(stat = 'identity', 
+           aes(fill = price)) +
+  coord_flip() +
+  labs(title = 'Bottom 10 Bike Models',
+       subtitle = 'By Sales and Primary Category',
+       x = '',
+       y = '',
+       fill = '') +
+  scale_fill_gradient(low = '#42bf04', high = '#bf0404', limits = c(0, 13000))
+
+p7 + p8
+```
+
+```{r}
+bikes$fips <- fips(bikes$bikeshop.state)
+```
+
+```{r}
+map_bikes <- bikes %>% 
+  group_by(bikeshop.state, fips) %>% 
+  summarise(total_qty = sum(quantity))
+  
+plot_usmap(data = map_bikes, values = 'total_qty', color = 'dark blue') +
+  theme(legend.position = 'right') +
+  labs(title = 'Bike Sales',
+       subtitle = 'By State') +
+  scale_fill_continuous(name = '')
+```
+
+## Forecast for Secondary Category
+
+```{r}
+# create new dataframe for primary categories
+secondary_monthly_qty <- bike_sales %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, category.secondary) %>% 
+  summarise(total.qty = sum(quantity))
+
+secondary_monthly_qty %>% 
+  ggplot(aes(order.month, total.qty, group = category.secondary)) +
+  geom_line(aes(color = category.secondary)) +
+  facet_wrap(~ category.secondary) +
+  labs(title = 'Quantity Sold: Year Plot',
+       x = '',
+       y = 'Number Sold',
+       subtitle = 'By Primary Category') +
+  scale_y_continuous() +
+  scale_x_date(date_labels = '%Y') +
+  theme_tq() +
+  theme(legend.position = 'none')
+```
+
+## Create Forecast
+
+### Create Temporary Data Frames
+```{r}
+# Create time series
+secondary_monthly_qty_ts <- secondary_monthly_qty %>% 
+  group_by(category.secondary) %>% 
+  nest() %>% 
+  mutate(data.ts = map(.x = data,
+                       .f = tk_ts,
+                       select = -order.month,
+                       start = 2011,
+                       freq = 12))
+
+secondary_monthly_qty_ts
+
+# create fit
+secondary_monthly_qty_fit <- secondary_monthly_qty_ts %>% 
+  mutate(fit.ets = map(data.ts, ets, model = 'MAM'))
+
+secondary_monthly_qty_fit
+```
+
+```{r}
+secondary_monthly_qty_fit %>% 
+  mutate(glance = map(fit.ets, sw_glance)) %>% 
+  unnest(glance)
+```
+
+```{r}
+secondary_augment_fit_ets <- secondary_monthly_qty_fit %>% 
+  mutate(augment = map(fit.ets, sw_augment, timetk_idx = TRUE, rename_index = 'date')) %>% 
+  unnest(augment)
+
+secondary_augment_fit_ets
+```
+
+```{r}
+# plot augmented fit residuals (goodness of forecast)
+secondary_augment_fit_ets %>% 
+  ggplot(aes(date, .resid, group = category.secondary)) +
+  geom_hline(yintercept = 0, color = 'black') +
+  geom_line(color = 'red') +
+  geom_smooth(method = 'loess') + 
+  facet_wrap(~ category.secondary, scale = 'free_y') +
+  labs(title = 'Bike Quantity Sold by Primary Category',
+       subtitle = 'ETS Model Residuals',
+       x = '',
+       y = 'Residual') +
+  scale_x_date(date_labels = '%Y')
+```
+
+### Forecast
+```{r}
+secondary_monthly_qty_fcast <- secondary_monthly_qty_fit %>% 
+  mutate(fcast.ets = map(fit.ets, forecast, h = 12))
+
+secondary_monthly_qty_fcast_tidy <- secondary_monthly_qty_fcast %>% 
+  mutate(sweep = map(fcast.ets, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>%
+  unnest(sweep)
+
+secondary_monthly_qty_fcast_tidy
+```
+
+```{r}
+secondary_monthly_qty_fcast_tidy %>% 
+  ggplot(aes(index, total.qty, color = key, group = category.secondary)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = 'light blue',
+              color = NA) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = 'blue',
+              color = NA,
+              alpha = .7) +
+  geom_line() +
+  facet_wrap(~ category.secondary, scales = 'free_y') +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  labs(title = 'Forecast for Secondary Categories',
+       x = '',
+       y = '')
+```
+
+
+```{r}
+secondary_augment_fit_arima <- secondary_monthly_qty_ts %>% 
+  mutate(fit_arima = map(data.ts, Arima, order = c(8,0,0)))
+
+secondary_monthly_qty_fcast_arima <- secondary_augment_fit_arima %>% 
+  mutate(fcast_arima = map(fit_arima, forecast, h = 12)) %>% 
+  mutate(sweep = map(fcast_arima, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>%
+  unnest(sweep)
+
+secondary_monthly_qty_fcast_arima %>% 
+  ggplot(aes(index, total.qty, color = key, group = category.secondary)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = 'light blue',
+              color = NA) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = 'blue',
+              color = NA,
+              alpha = .7) +
+  geom_line() +
+  facet_wrap(~ category.secondary, scales = 'free_y') +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  labs(title = 'Forecast for Secondary Categories',
+       x = '',
+       y = '')
+```
+
+```{r}
+secondary_augment_fit_arima <- secondary_monthly_qty_ts %>% 
+  mutate(fit_arima = map(data.ts, auto.arima))
+
+secondary_monthly_qty_fcast_arima <- secondary_augment_fit_arima %>% 
+  mutate(fcast_arima = map(fit_arima, forecast, h = 12)) %>% 
+  mutate(sweep = map(fcast_arima, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>%
+  unnest(sweep)
+
+secondary_monthly_qty_fcast_arima %>% 
+  ggplot(aes(index, total.qty, color = key, group = category.secondary)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = 'light blue',
+              color = NA) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = 'blue',
+              color = NA,
+              alpha = .7) +
+  geom_line() +
+  facet_wrap(~ category.secondary, scales = 'free_y') +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  labs(title = 'Forecast for Secondary Categories',
+       x = '',
+       y = '')
+```
+
+# Revenue
+```{r}
+bikes %>% 
+  group_by(bikeshop.name) %>% 
+  summarise(sales = sum(price.ext)) %>% 
+  arrange(desc(sales))
+
+sales <- bikes %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, category.secondary) %>% 
+  summarise(sales = sum(price.ext))
+```
+
+```{r}
+sales %>% 
+  ggplot(aes(order.month, sales, group = category.secondary, color = category.secondary)) +
+  geom_line() +
+  facet_wrap(~ category.secondary, scales = 'free_y') +
+  scale_y_continuous(labels = unit_format(unit = 'M', scale = 1e-6)) +
+  theme(legend.position = 'none')
+```
+
+```{r}
+top_shops <- bikes %>% 
+  group_by(bikeshop.name) %>% 
+  summarise(sales = sum(price.ext)) %>% 
+  slice_max(order_by = sales, n = 10) %>% 
+  ungroup() %>% 
+  pull(bikeshop.name)
+
+
+shop_sales <- bikes %>% 
+  # filter(bikeshop.name == top_shops) %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, bikeshop.name, category.secondary) %>% 
+  summarise(sales = sum(price.ext))
+
+
+```
+
+```{r}
+shop_sales %>% 
+  ggplot(aes(order.month, sales, group = category.secondary, color = category.secondary)) +
+  geom_line() +
+  theme(legend.position = 'right') +
+  scale_y_continuous(labels = unit_format(unit = 'M', scale = 1e-6)) +
+  facet_wrap(~ bikeshop.name, scales = 'free_y')
+```
+
+```{r}
+
+```
+

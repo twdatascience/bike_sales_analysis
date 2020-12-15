@@ -1,0 +1,93 @@
+---
+title: "Test Time Series"
+author: "Tyler Wilson"
+date: "7/26/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+library(sweep)
+library(forecast)
+library(patchwork)
+library(scales)
+library(usmap)
+
+theme_set(theme_minimal())
+
+set.seed(123)
+```
+
+```{r}
+# create random 72 'monthly' observations
+rand_vector = c()
+i <- 1
+while (i <= 72) {
+  if (length(rand_vector) == 0) {
+    rand_vector[[i]] <- sample(1:100, 1)
+    i <- i + 1
+  }
+  else {
+    last_val <- rand_vector[i-1]
+    range_low <- last_val - 5
+    range_high <- last_val + 5
+    rand_vector[[i]] <- sample(range_low:range_high,1)
+    i <- i + 1
+  }
+}
+```
+
+```{r}
+test <- tibble(x = seq(1, 72), y = rand_vector)
+test %>% 
+  ggplot(aes(x, y)) +
+  geom_line()
+```
+
+
+```{r}
+# create time series
+my_ts <- ts(rand_vector, start = c(2009, 1), end = c(2014, 12), frequency = 12)
+
+my_ts2 <- window(my_ts, start = c(2014, 6), end = c(2014, 12))
+
+plot(my_ts)
+```
+
+```{r}
+# seasonal decomp
+my_fit <- stl(my_ts, s.window = 'period')
+plot(my_fit)
+```
+
+```{r}
+monthplot(my_ts)
+```
+
+```{r}
+seasonplot(my_ts)
+```
+
+
+```{r}
+# exponential models
+my_fit <- ets(my_ts, model = 'ANN')
+plot(my_fit)
+```
+
+```{r}
+my_fit <- HoltWinters(my_ts, gamma = FALSE)
+plot(my_fit)
+```
+
+```{r}
+my_fit <- HoltWinters(my_ts)
+plot(my_fit)
+```
+
+```{r}
+forecast(my_fit, 12)
+```
+

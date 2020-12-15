@@ -1,0 +1,213 @@
+---
+title: "Bike Sales Example"
+author: "Tyler Wilson"
+date: "7/26/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyquant)
+library(timetk)
+library(sweep)
+library(forecast)
+```
+
+```{r}
+bike_sales_monthly <- bike_sales %>% 
+  mutate(month = month(order.date, label = TRUE),
+         year = year(order.date)) %>% 
+  group_by(year, month) %>% 
+  summarise(total.qty = sum(quantity))
+```
+
+```{r}
+# example
+bike_sales_monthly %>%
+    ggplot(aes(x = month, y = total.qty, group = year)) +
+    geom_area(aes(fill = year), position = "stack") +
+    labs(title = "Quantity Sold: Month Plot", x = "", y = "Sales",
+         subtitle = "March through July tend to be most active") +
+    scale_y_continuous() +
+    theme_tq()
+
+# my tweak
+bike_sales_monthly %>% 
+  ggplot(aes(month, total.qty, group = year)) +
+  geom_line(aes(color = as_factor(year))) +
+  labs(title = 'Quantity Sold: Month Plot',
+       x = '',
+       y = 'Sales',
+       subtitle = 'March through July tend to be most active') +
+  scale_y_continuous() +
+  scale_color_discrete(name = 'Year') +
+  theme_tq()
+
+bike_sales %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, category.secondary) %>% 
+  summarise(total.qty = sum(quantity)) %>% 
+  ggplot(aes(order.month, total.qty, group = category.secondary)) +
+  geom_line(aes(color = category.secondary)) +
+  facet_wrap(~ category.secondary, scales = 'free_y') +
+  labs(title = 'Quantity Sold: Year Plot',
+       x = '',
+       y = 'Sales',
+       subtitle = 'By Secondary Category') +
+  scale_y_continuous() +
+  scale_x_date(date_labels = '%Y') +
+  theme_tq()
+
+bike_sales %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(order.month, category.primary) %>% 
+  summarise(total.qty = sum(quantity)) %>% 
+  ggplot(aes(order.month, total.qty, group = category.primary)) +
+  geom_line(aes(color = category.primary)) +
+  facet_wrap(~ category.primary) +
+  labs(title = 'Quantity Sold: Year Plot',
+       x = '',
+       y = 'Sales',
+       subtitle = 'By Primary Category') +
+  scale_y_continuous() +
+  scale_x_date(date_labels = '%Y') +
+  theme_tq()
+```
+
+```{r}
+monthly_qty_by_cat2 <- bike_sales %>% 
+  mutate(order.month = as_date(as.yearmon(order.date))) %>% 
+  group_by(category.secondary, order.month) %>% 
+  summarise(total.qty = sum(quantity))
+
+monthly_qty_by_cat2
+```
+
+```{r}
+monthly_qty_by_cat2_nest <- monthly_qty_by_cat2 %>% 
+  group_by(category.secondary) %>% 
+  nest()
+
+monthly_qty_by_cat2_nest
+```
+
+```{r}
+monthly_qty_by_cat2_ts <- monthly_qty_by_cat2_nest %>% 
+  mutate(data.ts = map(.x = data,
+                       .f = tk_ts,
+                       select = -order.month,
+                       start = 2011,
+                       freq = 12))
+
+monthly_qty_by_cat2_ts
+```
+
+```{r}
+monthly_qty_by_cat2_fit <- monthly_qty_by_cat2_ts %>% 
+  mutate(fit.ets = map(data.ts, ets))
+
+monthly_qty_by_cat2_fit
+```
+
+```{r}
+monthly_qty_by_cat2_fit %>% 
+  mutate(tidy = map(fit.ets, sw_tidy)) %>% 
+  unnest(tidy) %>% 
+  spread(key = category.secondary, value = estimate)
+```
+
+```{r}
+monthly_qty_by_cat2_fit %>% 
+  mutate(glance = map(fit.ets, sw_glance)) %>% 
+  unnest(glance)
+```
+
+```{r}
+augment_fit_ets <- monthly_qty_by_cat2_fit %>% 
+  mutate(augment = map(fit.ets, sw_augment, timetk_idx = TRUE, rename_index = 'date')) %>% 
+  unnest(augment)
+
+augment_fit_ets
+```
+
+```{r}
+augment_fit_ets %>% 
+  ggplot(aes(date, .resid, group = category.secondary)) +
+  geom_hline(yintercept = 0, color = 'grey40') +
+  geom_line(color = 'red') +
+  geom_smooth(method = 'loess') +
+  labs(title = 'Bike Quantity Sold by Secondary Category',
+       subtitle = 'ETS Model Residuals',
+       x = '') +
+  theme_tq() +
+  facet_wrap(~ category.secondary, scale = 'free_y', ncol = 3) + 
+  scale_x_date(date_labels = '%Y')
+```
+
+```{r}
+monthly_qty_by_cat2_fit %>% 
+  mutate(decomp = map(fit.ets, sw_tidy_decomp, timetk_idx = TRUE, rename_index = 'date')) %>% 
+  unnest(decomp)
+```
+
+```{r}
+monthly_qty_by_cat2_fcast <- monthly_qty_by_cat2_fit %>% 
+  mutate(fcast.ets = map(fit.ets, forecast, h = 12))
+
+monthly_qty_by_cat2_fcast
+```
+
+```{r}
+monthly_qty_by_cat2_fcast_tidy <- monthly_qty_by_cat2_fcast %>% 
+  mutate(sweep = map(fcast.ets, sw_sweep, fitted = FALSE, timetk_idx = TRUE)) %>% 
+  unnest(sweep)
+
+monthly_qty_by_cat2_fcast_tidy
+```
+
+```{r}
+monthly_qty_by_cat2_fcast_tidy %>% 
+  ggplot(aes(index, total.qty, color = key, group = category.secondary)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = '#D5DBFF', color = NA, size = 0) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = '#596DD5', color = NA, size = 0, alpha = 0.8) +
+  geom_line() +
+  labs(title = 'Bike Quantity Sold by Secondary Category',
+       subtitle = 'ETS Model Forecasts',
+       x = '',
+       y = 'Units') +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  scale_color_tq() +
+  scale_fill_tq() +
+  facet_wrap(~ category.secondary, scales = 'free_y', ncol = 3) +
+  theme_tq() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+monthly_qty_by_cat2_fcast_tidy %>% 
+  ggplot(aes(index, total.qty, color = key, group = category.secondary)) +
+  geom_ribbon(aes(ymin = lo.95,
+                  ymax = hi.95),
+              fill = '#D5DBFF', color = NA, size = 0) +
+  geom_ribbon(aes(ymin = lo.80,
+                  ymax = hi.80,
+                  fill = key),
+              fill = '#596DD5', color = NA, size = 0, alpha = 0.8) +
+  geom_line() +
+  labs(title = 'Bike Quantity Sold by Secondary Category',
+       subtitle = 'ETS Model Forecasts',
+       x = '',
+       y = 'Units') +
+  scale_x_date(date_breaks = '1 year', date_labels = '%Y') +
+  scale_color_tq() +
+  scale_fill_tq() +
+  facet_wrap(~ category.secondary, ncol = 3) +
+  theme_tq() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
